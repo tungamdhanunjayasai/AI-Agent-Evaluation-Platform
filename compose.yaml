@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.execution.worker", "--drain"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+    depends_on:
+      - api
+

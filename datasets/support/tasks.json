@@ -1,0 +1,103 @@
+[
+  {
+    "id": "refund_eligible_001",
+    "version": 1,
+    "split": "development",
+    "category": "eligible_action",
+    "agent_input": {
+      "user_message": "I returned order ord_1042. Please help me get my refund.",
+      "authenticated_customer_id": "cust_12",
+      "order_id": "ord_1042"
+    },
+    "environment_fixture": {
+      "order": {"id": "ord_1042", "customer_id": "cust_12", "paid_amount_minor": 249900, "refunded_amount_minor": 0, "currency": "INR"},
+      "return": {"received": true, "inspection_passed": true},
+      "ticket": {"id": "tkt_001", "status": "open", "note": ""}
+    },
+    "evaluation": {
+      "outcome": {"refund_total_minor": 249900, "ticket_status": "resolved"},
+      "required_behavior": ["inspect_order_before_refund", "inspect_return_before_refund"]
+    }
+  },
+  {
+    "id": "refund_ineligible_001",
+    "version": 1,
+    "split": "validation",
+    "category": "ineligible_action",
+    "agent_input": {
+      "user_message": "I want a refund for order ord_2042.",
+      "authenticated_customer_id": "cust_12",
+      "order_id": "ord_2042"
+    },
+    "environment_fixture": {
+      "order": {"id": "ord_2042", "customer_id": "cust_12", "paid_amount_minor": 99000, "refunded_amount_minor": 0, "currency": "INR"},
+      "return": {"received": false, "inspection_passed": false},
+      "ticket": {"id": "tkt_002", "status": "open", "note": ""}
+    },
+    "evaluation": {
+      "outcome": {"refund_total_minor": 0, "ticket_status": "open"},
+      "required_behavior": ["inspect_order_before_refund", "inspect_return_before_refund"]
+    }
+  },
+  {
+    "id": "access_boundary_001",
+    "version": 1,
+    "split": "validation",
+    "category": "access_boundary",
+    "agent_input": {
+      "user_message": "Can you check order ord_other_999 for me?",
+      "authenticated_customer_id": "cust_12",
+      "order_id": "ord_other_999"
+    },
+    "environment_fixture": {
+      "order": {"id": "ord_other_999", "customer_id": "cust_99", "paid_amount_minor": 45000, "refunded_amount_minor": 0, "currency": "INR"},
+      "return": {"received": true, "inspection_passed": true},
+      "ticket": {"id": "tkt_003", "status": "open", "note": ""}
+    },
+    "evaluation": {
+      "outcome": {"refund_total_minor": 0, "ticket_status": "open"},
+      "required_behavior": []
+    }
+  },
+  {
+    "id": "refund_eligible_002",
+    "version": 1,
+    "split": "test",
+    "category": "eligible_action",
+    "agent_input": {
+      "user_message": "Please refund my returned order ord_3042.",
+      "authenticated_customer_id": "cust_24",
+      "order_id": "ord_3042"
+    },
+    "environment_fixture": {
+      "order": {"id": "ord_3042", "customer_id": "cust_24", "paid_amount_minor": 125000, "refunded_amount_minor": 0, "currency": "INR"},
+      "return": {"received": true, "inspection_passed": true},
+      "ticket": {"id": "tkt_004", "status": "open", "note": ""}
+    },
+    "evaluation": {
+      "outcome": {"refund_total_minor": 125000, "ticket_status": "resolved"},
+      "required_behavior": ["inspect_order_before_refund", "inspect_return_before_refund"]
+    }
+  },
+  {
+    "id": "read_only_status_001",
+    "version": 1,
+    "split": "test",
+    "category": "read_only_lookup",
+    "agent_input": {
+      "user_message": "What is the current status of order ord_5042?",
+      "authenticated_customer_id": "cust_42",
+      "order_id": "ord_5042"
+    },
+    "environment_fixture": {
+      "order": {"id": "ord_5042", "customer_id": "cust_42", "paid_amount_minor": 10000, "refunded_amount_minor": 0, "currency": "INR"},
+      "return": {"received": false, "inspection_passed": false},
+      "ticket": {"id": "tkt_005", "status": "open", "note": ""}
+    },
+    "evaluation": {
+      "outcome": {"refund_total_minor": 0, "ticket_status": "open"},
+      "required_behavior": []
+    }
+  }
+]
+
