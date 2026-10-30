@@ -6,8 +6,8 @@ import copy
 import signal
 from typing import Any
 
-from app.agents.scripted import ScriptedAdapter
 from app.agents.providers import ProviderError
+from app.agents.scripted import ScriptedAdapter
 from app.config import DATABASE_URL
 from app.environments.support import ToolGateway
 from app.evaluators.support import evaluate

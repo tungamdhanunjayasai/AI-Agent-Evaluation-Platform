@@ -29,9 +29,9 @@ async def lifespan(_app: FastAPI):
     if store.database_url:
         try:
             store.init_db()
-        except Exception:
+        except Exception as exc:
             # Keep the process alive so /health/ready can report a 503.
-            pass
+            _ = exc
     try:
         yield
     finally:
