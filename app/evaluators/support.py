@@ -10,7 +10,7 @@ REQUIRED_BEHAVIOR_TO_TOOL = {
 }
 
 SUCCESS_CLAIM_PATTERNS = [
-    re.compile(r"\brefund\s+(?:has\s+been|was|is\s+)?(?:issued|processed|completed|approved)\b", re.IGNORECASE),
+    re.compile(r"\brefund\s+(?:(?:has\s+been|was|is)\s+)?(?:issued|processed|completed|approved)\b", re.IGNORECASE),
     re.compile(r"\b(?:successfully\s+)?refunded\b", re.IGNORECASE),
     re.compile(r"\brefund\s+has\s+been\s+processed\b", re.IGNORECASE),
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 
 
@@ -38,6 +40,10 @@ class Store:
         self.database_url = database_url
         self.lease_seconds = lease_seconds or int(os.getenv("JOB_LEASE_SECONDS", "300"))
         self.max_attempts = max_attempts or int(os.getenv("MAX_ATTEMPTS", "3"))
+        self.pool_min_size = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+        self.pool_max_size = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
+        self._pool: ConnectionPool[Any] | None = None
+        self._pool_lock = threading.Lock()
         if self.database_url and urlparse(self.database_url).scheme.lower() not in {"postgres", "postgresql"}:
             raise ValueError("DATABASE_URL must use the postgresql:// or postgres:// scheme")
 
@@ -45,14 +51,34 @@ class Store:
     def connect(self) -> Iterator[psycopg.Connection[Any]]:
         if not self.database_url:
             raise RuntimeError("DATABASE_URL is required; configure a PostgreSQL connection URL")
-        conn = psycopg.connect(self.database_url, autocommit=True, row_factory=dict_row)
-        try:
+        with self._pool_connection() as conn:
             yield conn
-        finally:
-            conn.close()
+
+    @contextmanager
+    def _pool_connection(self) -> Iterator[psycopg.Connection[Any]]:
+        pool = self._get_pool()
+        with pool.connection() as conn:
+            yield conn
+
+    def _get_pool(self) -> ConnectionPool[Any]:
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    self._pool = ConnectionPool(
+                        conninfo=self.database_url,
+                        min_size=self.pool_min_size,
+                        max_size=self.pool_max_size,
+                        kwargs={"autocommit": True, "row_factory": dict_row},
+                        open=False,
+                    )
+                    self._pool.open(wait=True)
+        assert self._pool is not None
+        return self._pool
 
     def close(self) -> None:
-        """Release any pooled resources; retained as a no-op until pooling is enabled."""
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
     def init_db(self) -> None:
         with self.connect() as conn:
