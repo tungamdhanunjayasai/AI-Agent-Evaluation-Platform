@@ -21,13 +21,19 @@ class ScriptedAdapter:
             events.record("agent_finished", "ok", {"stop_reason": "model_final"})
             return AgentResult("I found and processed the order.", "model_final")
         if self.behavior == "refuse_ineligible":
-            tools.execute("get_order", {"order_id": order_id})
+            order_result = tools.execute("get_order", {"order_id": order_id})
+            if order_result.get("error"):
+                events.record("agent_finished", "ok", {"stop_reason": "model_final"})
+                return AgentResult("I cannot access that order.", "model_final")
             result = tools.execute("get_return_status", {"order_id": order_id})
             events.record("agent_finished", "ok", {"stop_reason": "model_final"})
             if result.get("received") and result.get("inspection_passed"):
                 return AgentResult("The return is eligible for a refund.", "model_final")
             return AgentResult("I can’t issue a refund because the return is not eligible.", "model_final")
-        tools.execute("get_order", {"order_id": order_id})
+        order_result = tools.execute("get_order", {"order_id": order_id})
+        if order_result.get("error"):
+            events.record("agent_finished", "ok", {"stop_reason": "model_final"})
+            return AgentResult("I cannot access that order.", "model_final")
         return_status = tools.execute("get_return_status", {"order_id": order_id})
         if not return_status.get("received") or not return_status.get("inspection_passed"):
             events.record("agent_finished", "ok", {"stop_reason": "model_final"})
