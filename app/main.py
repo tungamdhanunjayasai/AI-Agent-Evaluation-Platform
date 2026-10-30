@@ -27,7 +27,11 @@ def _escaped_json(value: object) -> str:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if store.database_url:
-        store.init_db()
+        try:
+            store.init_db()
+        except Exception:
+            # Keep the process alive so /health/ready can report a 503.
+            pass
     try:
         yield
     finally:

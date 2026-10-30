@@ -7,6 +7,7 @@ import signal
 from typing import Any
 
 from app.agents.scripted import ScriptedAdapter
+from app.agents.providers import ProviderError
 from app.config import DATABASE_URL
 from app.environments.support import ToolGateway
 from app.evaluators.support import evaluate
@@ -50,7 +51,7 @@ async def process_job(store: Store, job: dict[str, Any]) -> str:
         store.finish_run(run["id"], "completed", evaluation_status)
         return attempt_id
     except Exception as exc:
-        stop_reason = "model_error" if result is not None and result.stop_reason == "model_error" else "worker_exception"
+        stop_reason = "model_error" if isinstance(exc, ProviderError) or (result is not None and result.stop_reason == "model_error") else "worker_exception"
         if attempt_id and gateway:
             store.finish_attempt(attempt_id, "infrastructure_error", stop_reason, str(exc), gateway.environment)
             store.add_score(attempt_id, "system", "evaluation_error", None, ["worker_exception"], {"error": str(exc)})
