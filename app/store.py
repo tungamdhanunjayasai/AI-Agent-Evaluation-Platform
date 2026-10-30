@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse
@@ -12,8 +13,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 
-SCHEMA_PATH = Path(__file__).resolve().parent / "migrations" / "001_initial.sql"
-SCHEMA = SCHEMA_PATH.read_text(encoding="utf-8")
+MIGRATIONS_PATH = Path(__file__).resolve().parent / "migrations"
+SCHEMA = (MIGRATIONS_PATH / "001_initial.sql").read_text(encoding="utf-8")
 
 
 def utc_now() -> str:
@@ -31,10 +32,12 @@ class Store:
     to SQLite.
     """
 
-    def __init__(self, database_url: str | None = None):
+    def __init__(self, database_url: str | None = None, *, lease_seconds: int | None = None, max_attempts: int | None = None):
         if isinstance(database_url, Path):
             raise ValueError("SQLite filesystem paths are no longer supported; pass a PostgreSQL DATABASE_URL")
         self.database_url = database_url
+        self.lease_seconds = lease_seconds or int(os.getenv("JOB_LEASE_SECONDS", "300"))
+        self.max_attempts = max_attempts or int(os.getenv("MAX_ATTEMPTS", "3"))
         if self.database_url and urlparse(self.database_url).scheme.lower() not in {"postgres", "postgresql"}:
             raise ValueError("DATABASE_URL must use the postgresql:// or postgres:// scheme")
 
@@ -53,7 +56,17 @@ class Store:
 
     def init_db(self) -> None:
         with self.connect() as conn:
-            conn.execute(SCHEMA)
+            with conn.transaction():
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+                for path in sorted(MIGRATIONS_PATH.glob("*.sql")):
+                    version = path.name
+                    applied = conn.execute("SELECT 1 FROM schema_migrations WHERE version = %s", (version,)).fetchone()
+                    if applied:
+                        continue
+                    conn.execute(path.read_text(encoding="utf-8"))
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)", (version, utc_now()))
 
     @staticmethod
     def row(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -71,21 +84,23 @@ class Store:
 
     def upsert_dataset(self, dataset_id: str, version: int, name: str, tasks: list[dict[str, Any]]) -> str:
         version_id = f"{dataset_id}-v{version}"
+        incoming = {task["id"]: json.loads(json.dumps(task, sort_keys=True)) for task in tasks}
+        if len(incoming) != len(tasks):
+            raise ValueError("task ids must be unique within a dataset version")
         with self.connect() as conn:
             with conn.transaction():
+                existing = conn.execute("SELECT * FROM datasets WHERE dataset_version_id = %s FOR UPDATE", (version_id,)).fetchone()
+                if existing:
+                    rows = conn.execute("SELECT id, payload_json FROM tasks WHERE dataset_version_id = %s", (version_id,)).fetchall()
+                    current = {row["id"]: json.loads(row["payload_json"]) for row in rows}
+                    if current != incoming:
+                        raise ValueError("dataset version is immutable; bump the version")
+                    conn.execute("UPDATE datasets SET name = %s WHERE dataset_version_id = %s", (name, version_id))
+                    return version_id
                 conn.execute(
-                    """
-                    INSERT INTO datasets (dataset_version_id, dataset_id, version, name, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (dataset_version_id) DO UPDATE SET
-                      dataset_id = EXCLUDED.dataset_id,
-                      version = EXCLUDED.version,
-                      name = EXCLUDED.name,
-                      created_at = EXCLUDED.created_at
-                    """,
+                    "INSERT INTO datasets (dataset_version_id, dataset_id, version, name, created_at) VALUES (%s, %s, %s, %s, %s)",
                     (version_id, dataset_id, version, name, utc_now()),
                 )
-                conn.execute("DELETE FROM tasks WHERE dataset_version_id = %s", (version_id,))
                 for task in tasks:
                     conn.execute(
                         "INSERT INTO tasks (id, dataset_version_id, category, payload_json) VALUES (%s, %s, %s, %s)",
@@ -161,12 +176,12 @@ class Store:
                         for task in tasks:
                             run_id = new_id("run")
                             conn.execute(
-                                "INSERT INTO runs (id, experiment_id, task_id, agent_config_id, repetition, execution_status, evaluation_status, attempt_id, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                                (run_id, experiment_id, task["id"], config_id, rep, "queued", "pending", None, utc_now()),
+                                "INSERT INTO runs (id, experiment_id, dataset_version_id, task_id, agent_config_id, repetition, execution_status, evaluation_status, attempt_id, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                (run_id, experiment_id, dataset_version_id, task["id"], config_id, rep, "queued", "pending", None, utc_now()),
                             )
                             conn.execute(
-                                "INSERT INTO jobs (id, run_id, status, claimed_at, finished_at, error) VALUES (%s, %s, %s, %s, %s, %s)",
-                                (new_id("job"), run_id, "queued", None, None, None),
+                                "INSERT INTO jobs (id, run_id, status, attempts_count, lease_expires_at, claimed_at, finished_at, error) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                                (new_id("job"), run_id, "queued", 0, None, None, None, None),
                             )
         return self.get_experiment(experiment_id)  # type: ignore[return-value]
 
@@ -187,11 +202,19 @@ class Store:
     def claim_job(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.transaction():
+                now = datetime.now(timezone.utc)
+                now_text = now.isoformat()
+                stale = conn.execute(
+                    "UPDATE jobs SET status = 'queued', lease_expires_at = NULL, claimed_at = NULL WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= %s RETURNING run_id",
+                    (now_text,),
+                ).fetchall()
+                for item in stale:
+                    conn.execute("UPDATE runs SET execution_status = 'queued' WHERE id = %s AND execution_status = 'running'", (item["run_id"],))
                 row = conn.execute("SELECT * FROM jobs WHERE status = 'queued' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1").fetchone()
                 if not row:
                     return None
-                now = utc_now()
-                conn.execute("UPDATE jobs SET status = 'running', claimed_at = %s WHERE id = %s", (now, row["id"]))
+                lease_expires_at = (now + timedelta(seconds=self.lease_seconds)).isoformat()
+                conn.execute("UPDATE jobs SET status = 'running', attempts_count = attempts_count + 1, claimed_at = %s, lease_expires_at = %s WHERE id = %s", (now_text, lease_expires_at, row["id"]))
                 conn.execute("UPDATE runs SET execution_status = 'running' WHERE id = %s", (row["run_id"],))
                 return self.row(conn.execute("SELECT * FROM jobs WHERE id = %s", (row["id"],)).fetchone())
 
@@ -200,7 +223,7 @@ class Store:
             run = self.row(conn.execute("SELECT * FROM runs WHERE id = %s", (run_id,)).fetchone())
             if not run:
                 raise KeyError(run_id)
-            task_row = self.row(conn.execute("SELECT payload_json FROM tasks WHERE id = %s", (run["task_id"],)).fetchone())
+            task_row = self.row(conn.execute("SELECT payload_json FROM tasks WHERE dataset_version_id = %s AND id = %s", (run["dataset_version_id"], run["task_id"])).fetchone())
             assert task_row is not None
             task = json.loads(task_row["payload_json"])
             config = self.decode(self.row(conn.execute("SELECT * FROM agent_configs WHERE id = %s", (run["agent_config_id"],)).fetchone()), "settings_json")
@@ -253,20 +276,28 @@ class Store:
                 (new_id("score"), attempt_id, evaluator, status, score, json.dumps(reasons), json.dumps(evidence), utc_now()),
             )
 
-    def finish_run(self, run_id: str, execution_status: str, evaluation_status: str) -> None:
+    def finish_run(self, run_id: str, execution_status: str, evaluation_status: str, *, error: str | None = None) -> None:
         with self.connect() as conn:
             with conn.transaction():
-                conn.execute("UPDATE runs SET execution_status = %s, evaluation_status = %s WHERE id = %s", (execution_status, evaluation_status, run_id))
-                conn.execute("UPDATE jobs SET status = 'completed', finished_at = %s WHERE run_id = %s", (utc_now(), run_id))
+                job = conn.execute("SELECT * FROM jobs WHERE run_id = %s FOR UPDATE", (run_id,)).fetchone()
+                if not job:
+                    raise KeyError(run_id)
+                retry = execution_status == "infrastructure_error" and job["attempts_count"] < self.max_attempts
+                run_status = "queued" if retry else execution_status
+                job_status = "queued" if retry else ("failed" if execution_status == "infrastructure_error" else "completed")
+                conn.execute("UPDATE runs SET execution_status = %s, evaluation_status = %s WHERE id = %s", (run_status, evaluation_status, run_id))
+                conn.execute("UPDATE jobs SET status = %s, finished_at = %s, lease_expires_at = NULL, error = %s WHERE run_id = %s", (job_status, None if retry else utc_now(), error, run_id))
                 exp_row = conn.execute("SELECT experiment_id FROM runs WHERE id = %s", (run_id,)).fetchone()
                 assert exp_row is not None
                 exp_id = exp_row["experiment_id"]
                 remaining_row = conn.execute("SELECT COUNT(*) AS remaining FROM runs WHERE experiment_id = %s AND execution_status IN ('queued', 'running')", (exp_id,)).fetchone()
                 assert remaining_row is not None
-                if remaining_row["remaining"] == 0:
-                    conn.execute("UPDATE experiments SET status = 'completed', completed_at = %s WHERE id = %s", (utc_now(), exp_id))
-                else:
-                    conn.execute("UPDATE experiments SET status = 'running' WHERE id = %s", (exp_id,))
+                experiment = conn.execute("SELECT status FROM experiments WHERE id = %s", (exp_id,)).fetchone()
+                if experiment and experiment["status"] != "cancelled":
+                    if remaining_row["remaining"] == 0:
+                        conn.execute("UPDATE experiments SET status = 'completed', completed_at = %s WHERE id = %s", (utc_now(), exp_id))
+                    else:
+                        conn.execute("UPDATE experiments SET status = 'running' WHERE id = %s", (exp_id,))
 
     def get_attempt(self, attempt_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -301,5 +332,5 @@ class Store:
 
     def export_rows(self, experiment_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT r.*, t.category, t.payload_json, a.final_response, a.stop_reason FROM runs r JOIN tasks t ON t.id = r.task_id LEFT JOIN attempts a ON a.id = r.attempt_id WHERE r.experiment_id = %s ORDER BY r.created_at", (experiment_id,)).fetchall()
+            rows = conn.execute("SELECT r.*, t.category, t.payload_json, a.final_response, a.stop_reason FROM runs r JOIN tasks t ON t.dataset_version_id = r.dataset_version_id AND t.id = r.task_id LEFT JOIN attempts a ON a.id = r.attempt_id WHERE r.experiment_id = %s ORDER BY r.created_at", (experiment_id,)).fetchall()
             return [self.row(r) for r in rows]  # type: ignore[list-item]

@@ -5,12 +5,18 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   worker:
     build: .
-    command: ["python", "-m", "app.execution.worker", "--drain"]
+    command: ["python", "-m", "app.execution.worker", "--loop"]
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 

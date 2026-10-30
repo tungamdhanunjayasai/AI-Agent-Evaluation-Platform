@@ -17,7 +17,7 @@ class AgentConfigCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str | None = None
     name: str = Field(min_length=1)
-    adapter: Literal["scripted"] = "scripted"
+    adapter: Literal["scripted", "llm"] = "scripted"
     settings: dict[str, Any] = Field(default_factory=dict)
 
 

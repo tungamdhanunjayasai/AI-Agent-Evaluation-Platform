@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import signal
 from typing import Any
 
 from app.agents.scripted import ScriptedAdapter
@@ -22,23 +23,32 @@ async def process_job(store: Store, job: dict[str, Any]) -> str:
     recorder = TraceRecorder(store, attempt_id)
     recorder.record("attempt_started", "ok", {"run_id": run["id"], "task_id": task["id"]})
     gateway = ToolGateway(fixture, recorder)
-    behavior = config.get("settings_json", {}).get("behavior", "correct") if config else "correct"
-    adapter = ScriptedAdapter(behavior)
+    settings = config.get("settings_json", {}) if config else {}
+    if config and config.get("adapter") == "llm":
+        from app.agents.llm import LLMAdapter
+
+        adapter = LLMAdapter.from_settings(settings)
+    else:
+        adapter = ScriptedAdapter(settings.get("behavior", "correct"))
+    result = None
     try:
         result = await adapter.run(task["agent_input"], gateway, recorder, None)
+        if result.stop_reason == "model_error":
+            raise RuntimeError(result.metadata.get("error", "model provider error"))
         attempt = {"hidden_fixture_json": hidden_fixture, "environment_json": gateway.environment, "final_response": result.final_response, "events": store.list_events(attempt_id), "violations": gateway.violations, "effects": gateway.effects}
         store.finish_attempt(attempt_id, "completed", result.stop_reason, result.final_response, gateway.environment)
         recorder.record("attempt_finished", "ok", {"execution_status": "completed", "stop_reason": result.stop_reason})
-        for score in evaluate(attempt):
-            store.add_score(attempt_id, score["evaluator"], score["status"], score["score"], score["reasons"], score["evidence"])
         scores = evaluate(attempt)
+        for score in scores:
+            store.add_score(attempt_id, score["evaluator"], score["status"], score["score"], score["reasons"], score["evidence"])
         evaluation_status = "pass" if all(score["status"] == "pass" for score in scores) else "fail"
         store.finish_run(run["id"], "completed", evaluation_status)
         return attempt_id
     except Exception as exc:
-        store.finish_attempt(attempt_id, "infrastructure_error", "worker_exception", str(exc), gateway.environment)
+        stop_reason = "model_error" if result is not None and result.stop_reason == "model_error" else "worker_exception"
+        store.finish_attempt(attempt_id, "infrastructure_error", stop_reason, str(exc), gateway.environment)
         store.add_score(attempt_id, "system", "evaluation_error", None, ["worker_exception"], {"error": str(exc)})
-        store.finish_run(run["id"], "infrastructure_error", "pending")
+        store.finish_run(run["id"], "infrastructure_error", "pending", error=str(exc))
         return attempt_id
 
 
@@ -55,12 +65,40 @@ async def drain(store: Store, once: bool = False) -> int:
     return processed
 
 
+async def run_loop(store: Store, poll_interval: float = 2.0) -> int:
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stop_event.set)
+        except NotImplementedError:
+            pass
+    processed = 0
+    while not stop_event.is_set():
+        count = await drain(store, once=True)
+        processed += count
+        if count == 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                pass
+    return processed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true")
-    parser.add_argument("--drain", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument("--drain", action="store_true")
+    mode.add_argument("--loop", action="store_true")
+    parser.add_argument("--poll-interval", type=float, default=2.0)
     args = parser.parse_args()
-    count = asyncio.run(drain(Store(DATABASE_URL), once=args.once and not args.drain))
+    worker_store = Store(DATABASE_URL)
+    if args.loop:
+        count = asyncio.run(run_loop(worker_store, args.poll_interval))
+    else:
+        count = asyncio.run(drain(worker_store, once=args.once))
+    worker_store.close()
     print(f"processed_jobs={count}")
 
 
