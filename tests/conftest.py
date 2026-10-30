@@ -33,6 +33,7 @@ def clean_test_database():
     database_url = _test_database_url()
     if database_url:
         store = Store(database_url)
+        store.init_db()
         with store.connect() as conn:
             with conn.transaction():
                 conn.execute("TRUNCATE TABLE jobs, scores, events, attempts, runs, experiments, tasks, agent_configs, datasets CASCADE")

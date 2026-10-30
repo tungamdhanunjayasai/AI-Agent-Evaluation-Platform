@@ -35,20 +35,21 @@ class Store:
         if isinstance(database_url, Path):
             raise ValueError("SQLite filesystem paths are no longer supported; pass a PostgreSQL DATABASE_URL")
         self.database_url = database_url
-        if not self.database_url:
-            raise RuntimeError("DATABASE_URL is required; configure a Supabase PostgreSQL connection URL")
-        scheme = urlparse(self.database_url).scheme.lower()
-        if scheme not in {"postgres", "postgresql"}:
+        if self.database_url and urlparse(self.database_url).scheme.lower() not in {"postgres", "postgresql"}:
             raise ValueError("DATABASE_URL must use the postgresql:// or postgres:// scheme")
-        self.init_db()
 
     @contextmanager
     def connect(self) -> Iterator[psycopg.Connection[Any]]:
+        if not self.database_url:
+            raise RuntimeError("DATABASE_URL is required; configure a PostgreSQL connection URL")
         conn = psycopg.connect(self.database_url, autocommit=True, row_factory=dict_row)
         try:
             yield conn
         finally:
             conn.close()
+
+    def close(self) -> None:
+        """Release any pooled resources; retained as a no-op until pooling is enabled."""
 
     def init_db(self) -> None:
         with self.connect() as conn:
@@ -173,6 +174,10 @@ class Store:
         with self.connect() as conn:
             row = self.row(conn.execute("SELECT * FROM experiments WHERE id = %s", (experiment_id,)).fetchone())
             return self.decode(row, "manifest_json")
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            return self.row(conn.execute("SELECT * FROM runs WHERE id = %s", (run_id,)).fetchone())
 
     def list_runs(self, experiment_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

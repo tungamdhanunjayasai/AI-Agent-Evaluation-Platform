@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import html
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
+import psycopg
 
 from app.config import DATABASE_URL, DATASET_PATH
 from app.reports import export_csv, export_json
@@ -12,14 +15,30 @@ from app.schemas import AgentConfigCreate, ComparisonRequest, DatasetImportReque
 from app.store import Store, new_id, utc_now
 
 store = Store(DATABASE_URL)
-app = FastAPI(title="Agent Evaluation Platform", version="0.1.0")
+
+
+def _escaped_json(value: object) -> str:
+    return html.escape(json.dumps(value, indent=2), quote=True)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if store.database_url:
+        store.init_db()
+    try:
+        yield
+    finally:
+        store.close()
+
+
+app = FastAPI(title="Agent Evaluation Platform", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> str:
     datasets = store.list_datasets()
     configs = store.list_configs()
-    return f"""<!doctype html><html><head><title>Agent Evaluation Platform</title><style>body{{font:16px system-ui;max-width:900px;margin:40px auto;padding:0 20px}}code{{background:#f1f5f9;padding:2px 5px}}.card{{border:1px solid #ddd;border-radius:10px;padding:16px;margin:12px 0}}</style></head><body><h1>Agent Evaluation Platform</h1><p>Deterministic support-agent evaluation dashboard.</p><div class='card'><b>Datasets</b><p>{len(datasets)} version(s)</p><pre>{json.dumps(datasets, indent=2)}</pre></div><div class='card'><b>Agent configurations</b><p>{len(configs)} config(s)</p><pre>{json.dumps(configs, indent=2)}</pre></div><p>Use <a href='/docs'>/docs</a> to create an experiment, then run <code>python -m app.execution.worker --drain</code>.</p></body></html>"""
+    return f"""<!doctype html><html><head><title>Agent Evaluation Platform</title><style>body{{font:16px system-ui;max-width:900px;margin:40px auto;padding:0 20px}}code{{background:#f1f5f9;padding:2px 5px}}.card{{border:1px solid #ddd;border-radius:10px;padding:16px;margin:12px 0}}</style></head><body><h1>Agent Evaluation Platform</h1><p>Deterministic support-agent evaluation dashboard.</p><div class='card'><b>Datasets</b><p>{len(datasets)} version(s)</p><pre>{_escaped_json(datasets)}</pre></div><div class='card'><b>Agent configurations</b><p>{len(configs)} config(s)</p><pre>{_escaped_json(configs)}</pre></div><p>Use <a href='/docs'>/docs</a> to create an experiment, then run <code>python -m app.execution.worker --drain</code>.</p></body></html>"""
 
 
 @app.get("/health/live")
@@ -29,7 +48,11 @@ def live() -> dict[str, str]:
 
 @app.get("/health/ready")
 def ready() -> dict[str, str]:
-    store.init_db()
+    try:
+        with store.connect() as conn:
+            conn.execute("SELECT 1")
+    except (OSError, psycopg.Error, RuntimeError) as exc:
+        raise HTTPException(503, "database unavailable") from exc
     return {"status": "ready"}
 
 
@@ -37,7 +60,10 @@ def ready() -> dict[str, str]:
 def import_dataset(request: DatasetImportRequest) -> dict[str, str]:
     try:
         version_id = store.upsert_dataset(request.dataset_id, request.version, request.name, request.tasks)
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
+        status_code = 409 if str(exc) == "dataset version is immutable; bump the version" else 400
+        raise HTTPException(status_code, str(exc)) from exc
+    except KeyError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"dataset_version_id": version_id, "task_count": str(len(request.tasks))}
 
@@ -86,21 +112,22 @@ def experiment_runs(experiment_id: str) -> list[dict]:
 
 
 @app.post("/experiments/{experiment_id}/cancel")
-def cancel_experiment(experiment_id: str) -> dict[str, str]:
+def cancel_experiment(experiment_id: str) -> dict[str, object]:
+    if not store.get_experiment(experiment_id):
+        raise HTTPException(404, "experiment not found")
     with store.connect() as conn:
         with conn.transaction():
             changed = conn.execute("UPDATE jobs SET status = 'cancelled', finished_at = %s WHERE run_id IN (SELECT id FROM runs WHERE experiment_id = %s) AND status = 'queued'", (utc_now(), experiment_id)).rowcount
             conn.execute("UPDATE runs SET execution_status = 'cancelled' WHERE experiment_id = %s AND execution_status = 'queued'", (experiment_id,))
             conn.execute("UPDATE experiments SET status = 'cancelled' WHERE id = %s", (experiment_id,))
-    return {"status": "cancelled", "queued_jobs_cancelled": str(changed)}
+    return {"status": "cancelled", "queued_jobs_cancelled": changed}
 
 
 @app.get("/runs/{run_id}")
 def run(run_id: str) -> dict:
-    rows = [r for r in store.list_runs(store.get_run_context(run_id)[0]["experiment_id"]) if r["id"] == run_id]
-    if not rows:
+    result = store.get_run(run_id)
+    if not result:
         raise HTTPException(404, "run not found")
-    result = rows[0]
     if result.get("attempt_id"):
         result["attempt"] = store.get_attempt(result["attempt_id"])
     return result
