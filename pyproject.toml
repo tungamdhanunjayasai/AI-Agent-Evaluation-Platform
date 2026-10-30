@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9"]
+test = ["pytest>=8,<9", "ruff>=0.8,<1"]
+llm = ["google-genai>=1,<2", "anthropic>=0.40,<1"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
