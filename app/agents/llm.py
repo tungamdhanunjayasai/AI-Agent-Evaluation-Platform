@@ -71,9 +71,10 @@ class LLMAdapter:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = await asyncio.wait_for(self.provider.complete(messages=messages, tools=tools, model=self.model, temperature=self.temperature), timeout=self.timeout_seconds)
+                raw_response = await asyncio.wait_for(self.provider.complete(messages=messages, tools=tools, model=self.model, temperature=self.temperature), timeout=self.timeout_seconds)
+                response = _coerce_response(raw_response)
                 events.record("model_response", "ok", {"model": response.model or self.model, "step": step, "usage": response.usage})
-                return _coerce_response(response)
+                return response
             except Exception as exc:
                 last_error = exc
                 if attempt < self.max_retries:
