@@ -22,6 +22,8 @@ pytest
 uvicorn app.main:app --reload
 ```
 
+CI runs `python -m ruff check app tests scripts` followed by `python -m pytest` against PostgreSQL 16.
+
 Then open `http://127.0.0.1:8000/` or `http://127.0.0.1:8000/docs`.
 
 The smoke seed creates five support tasks and three configurations: a correct agent, a convincing false-success agent, and an agent that attempts to use another customer's order. Create an experiment through the API or use:

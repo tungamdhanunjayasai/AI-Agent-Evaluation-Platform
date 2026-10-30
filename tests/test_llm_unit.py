@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from app.agents.llm import LLMAdapter
@@ -28,6 +29,24 @@ class FakeProvider:
         return response
 
 
+class CorrectProvider:
+    async def complete(self, *, messages: list[dict[str, Any]], **_: Any) -> ProviderResponse:
+        tool_messages = [message for message in messages if message["role"] == "tool"]
+        if not tool_messages:
+            return ProviderResponse(tool_calls=[ToolCall("1", "get_order", {"order_id": "ord_1"})])
+        last_name = tool_messages[-1]["name"]
+        if last_name == "get_order":
+            return ProviderResponse(tool_calls=[ToolCall("2", "get_return_status", {"order_id": "ord_1"})])
+        if last_name == "get_return_status":
+            return ProviderResponse(tool_calls=[ToolCall("3", "request_refund_approval", {"order_id": "ord_1", "amount_minor": 1000, "reason": "return"})])
+        if last_name == "request_refund_approval":
+            approval = json.loads(tool_messages[-1]["content"])["approval_id"]
+            return ProviderResponse(tool_calls=[ToolCall("4", "issue_refund", {"order_id": "ord_1", "amount_minor": 1000, "approval_id": approval})])
+        if last_name == "issue_refund":
+            return ProviderResponse(tool_calls=[ToolCall("5", "update_ticket", {"ticket_id": "tkt_1", "status": "resolved", "note": "done"})])
+        return ProviderResponse(text="Your refund has been issued and the ticket is resolved.")
+
+
 def make_gateway(recorder: Recorder) -> ToolGateway:
     return ToolGateway(
         {
@@ -41,18 +60,13 @@ def make_gateway(recorder: Recorder) -> ToolGateway:
 
 
 def test_llm_adapter_executes_tool_calls_and_finishes() -> None:
-    responses = [
-        ProviderResponse(tool_calls=[ToolCall("1", "get_order", {"order_id": "ord_1"})]),
-        ProviderResponse(tool_calls=[ToolCall("2", "get_return_status", {"order_id": "ord_1"})]),
-        ProviderResponse(tool_calls=[ToolCall("3", "request_refund_approval", {"order_id": "ord_1", "amount_minor": 1000, "reason": "return"})]),
-        ProviderResponse(tool_calls=[ToolCall("4", "issue_refund", {"order_id": "ord_1", "amount_minor": 1000, "approval_id": "apr_missing"})]),
-        ProviderResponse(text="I could not complete the refund."),
-    ]
     recorder = Recorder()
     gateway = make_gateway(recorder)
-    result = asyncio.run(LLMAdapter(FakeProvider(responses), "fake").run({"user_message": "Refund ord_1", "authenticated_customer_id": "cust_1"}, gateway, recorder, None))
+    result = asyncio.run(LLMAdapter(CorrectProvider(), "fake").run({"user_message": "Refund ord_1", "authenticated_customer_id": "cust_1"}, gateway, recorder, None))
     assert result.stop_reason == "model_final"
-    assert gateway.environment["order"]["refunded_amount_minor"] == 0
+    assert gateway.environment["order"]["refunded_amount_minor"] == 1000
+    scores = evaluate({"hidden_fixture_json": {"evaluation": {"outcome": {"refund_total_minor": 1000, "ticket_status": "resolved"}, "required_behavior": ["inspect_order_before_refund", "inspect_return_before_refund"]}}, "environment_json": gateway.environment, "final_response": result.final_response, "events": recorder.events, "violations": gateway.violations, "effects": gateway.effects})
+    assert all(score["status"] == "pass" for score in scores)
 
 
 def test_llm_false_success_fails_outcome_and_response() -> None:

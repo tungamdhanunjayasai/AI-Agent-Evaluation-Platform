@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import json
 import html
+import json
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
-import psycopg
 
-from app.config import DATABASE_URL, DATASET_PATH
+from app.config import DATABASE_URL
 from app.reports import export_csv, export_json
-from app.schemas import AgentConfigCreate, ComparisonRequest, DatasetImportRequest, ExperimentCreate
+from app.schemas import (
+    AgentConfigCreate,
+    ComparisonRequest,
+    DatasetImportRequest,
+    ExperimentCreate,
+)
 from app.store import Store, new_id, utc_now
 
 store = Store(DATABASE_URL)
@@ -51,7 +54,7 @@ def ready() -> dict[str, str]:
     try:
         with store.connect() as conn:
             conn.execute("SELECT 1")
-    except (OSError, psycopg.Error, RuntimeError) as exc:
+    except Exception as exc:
         raise HTTPException(503, "database unavailable") from exc
     return {"status": "ready"}
 

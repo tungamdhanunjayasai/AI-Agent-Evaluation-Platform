@@ -8,30 +8,35 @@ from typing import Any
 
 from app.agents.scripted import ScriptedAdapter
 from app.config import DATABASE_URL
-from app.evaluators.support import evaluate
 from app.environments.support import ToolGateway
+from app.evaluators.support import evaluate
 from app.store import Store, new_id
 from app.trace import TraceRecorder
 
 
 async def process_job(store: Store, job: dict[str, Any]) -> str:
-    run, task, config, _experiment = store.get_run_context(job["run_id"])
-    fixture = copy.deepcopy(task["environment_fixture"])
-    fixture["authenticated_customer_id"] = task["agent_input"]["authenticated_customer_id"]
-    hidden_fixture = {"environment_fixture": copy.deepcopy(fixture), "evaluation": copy.deepcopy(task.get("evaluation", {}))}
-    attempt_id = store.create_attempt(run["id"], new_id("env"), fixture, hidden_fixture)
-    recorder = TraceRecorder(store, attempt_id)
-    recorder.record("attempt_started", "ok", {"run_id": run["id"], "task_id": task["id"]})
-    gateway = ToolGateway(fixture, recorder)
-    settings = config.get("settings_json", {}) if config else {}
-    if config and config.get("adapter") == "llm":
-        from app.agents.llm import LLMAdapter
-
-        adapter = LLMAdapter.from_settings(settings)
-    else:
-        adapter = ScriptedAdapter(settings.get("behavior", "correct"))
+    run: dict[str, Any] | None = None
+    task: dict[str, Any] | None = None
+    gateway: ToolGateway | None = None
+    recorder: TraceRecorder | None = None
+    attempt_id: str | None = None
     result = None
     try:
+        run, task, config, _experiment = store.get_run_context(job["run_id"])
+        fixture = copy.deepcopy(task["environment_fixture"])
+        fixture["authenticated_customer_id"] = task["agent_input"]["authenticated_customer_id"]
+        hidden_fixture = {"environment_fixture": copy.deepcopy(fixture), "evaluation": copy.deepcopy(task.get("evaluation", {}))}
+        attempt_id = store.create_attempt(run["id"], new_id("env"), fixture, hidden_fixture)
+        recorder = TraceRecorder(store, attempt_id)
+        recorder.record("attempt_started", "ok", {"run_id": run["id"], "task_id": task["id"]})
+        gateway = ToolGateway(fixture, recorder)
+        settings = config.get("settings_json", {}) if config else {}
+        if config and config.get("adapter") == "llm":
+            from app.agents.llm import LLMAdapter
+
+            adapter = LLMAdapter.from_settings(settings)
+        else:
+            adapter = ScriptedAdapter(settings.get("behavior", "correct"))
         result = await adapter.run(task["agent_input"], gateway, recorder, None)
         if result.stop_reason == "model_error":
             raise RuntimeError(result.metadata.get("error", "model provider error"))
@@ -46,10 +51,11 @@ async def process_job(store: Store, job: dict[str, Any]) -> str:
         return attempt_id
     except Exception as exc:
         stop_reason = "model_error" if result is not None and result.stop_reason == "model_error" else "worker_exception"
-        store.finish_attempt(attempt_id, "infrastructure_error", stop_reason, str(exc), gateway.environment)
-        store.add_score(attempt_id, "system", "evaluation_error", None, ["worker_exception"], {"error": str(exc)})
-        store.finish_run(run["id"], "infrastructure_error", "pending", error=str(exc))
-        return attempt_id
+        if attempt_id and gateway:
+            store.finish_attempt(attempt_id, "infrastructure_error", stop_reason, str(exc), gateway.environment)
+            store.add_score(attempt_id, "system", "evaluation_error", None, ["worker_exception"], {"error": str(exc)})
+        store.finish_run(job["run_id"], "infrastructure_error", "pending", error=str(exc))
+        return attempt_id or ""
 
 
 async def drain(store: Store, once: bool = False) -> int:
@@ -80,7 +86,7 @@ async def run_loop(store: Store, poll_interval: float = 2.0) -> int:
         if count == 0:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
     return processed
 

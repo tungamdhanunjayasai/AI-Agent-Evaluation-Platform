@@ -4,23 +4,23 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 import psycopg
-from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
-
+from psycopg_pool import ConnectionPool
 
 MIGRATIONS_PATH = Path(__file__).resolve().parent / "migrations"
 SCHEMA = (MIGRATIONS_PATH / "001_initial.sql").read_text(encoding="utf-8")
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def new_id(prefix: str) -> str:
@@ -228,7 +228,7 @@ class Store:
     def claim_job(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.transaction():
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 now_text = now.isoformat()
                 stale = conn.execute(
                     "UPDATE jobs SET status = 'queued', lease_expires_at = NULL, claimed_at = NULL WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= %s RETURNING run_id",

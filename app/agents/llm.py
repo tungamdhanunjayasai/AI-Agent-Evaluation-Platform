@@ -5,7 +5,13 @@ import json
 from typing import Any
 
 from app.agents.base import AgentResult
-from app.agents.providers import Provider, ProviderResponse, ProviderError, ToolCall, provider_for
+from app.agents.providers import (
+    Provider,
+    ProviderError,
+    ProviderResponse,
+    ToolCall,
+    provider_for,
+)
 
 
 class LLMAdapter:
@@ -68,7 +74,7 @@ class LLMAdapter:
                 response = await asyncio.wait_for(self.provider.complete(messages=messages, tools=tools, model=self.model, temperature=self.temperature), timeout=self.timeout_seconds)
                 events.record("model_response", "ok", {"model": response.model or self.model, "step": step, "usage": response.usage})
                 return _coerce_response(response)
-            except (Exception,) as exc:
+            except Exception as exc:
                 last_error = exc
                 if attempt < self.max_retries:
                     await asyncio.sleep(0.05 * (attempt + 1))

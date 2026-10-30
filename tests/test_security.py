@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import app.main as main
+from app import main
 
 
 def test_dashboard_escapes_dataset_and_config_json(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 from app.store import Store
 
-
 load_dotenv(Path.cwd() / ".env")
 
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 REQUIRED_BEHAVIOR_TO_TOOL = {
     "inspect_order_before_refund": "get_order",
     "inspect_return_before_refund": "get_return_status",
